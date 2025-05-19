@@ -1,37 +1,63 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import discord
 from discord.ext import tasks, commands
 
-TOKEN = 'YOUR_DISCORD_BOT_TOKEN'
-CHANNEL_ID = 1234567890  # 投稿先チャンネルID
-NITTER_URL = 'https://nitter.poast.org/Crypto_AI_chan_'
+# 環境変数からトークンとチャンネルIDを取得
+TOKEN = os.environ.get("DISCORD_TOKEN")
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
+
+# 対象NitterアカウントのURLリスト
+NITTER_URLS = [
+    "https://nitter.poast.org/CryptoJPTrans",
+    "https://nitter.poast.org/angorou7"
+]
+
+# 各アカウントごとの最新投稿記憶用ディクショナリ
+last_post_urls = {}
 
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-last_post = None  # 最後の投稿URLなどを記憶
+@tasks.loop(minutes=60)
+async def fetch_and_post():
+    global last_post_urls
+    for url in NITTER_URLS:
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                print(f"[ERROR] Failed to fetch {url}: {response.status_code}")
+                continue
 
-@tasks.loop(minutes=60)  # 1時間ごとにチェック
-async def check_nitter():
-    global last_post
-    res = requests.get(NITTER_URL)
-    soup = BeautifulSoup(res.text, 'html.parser')
-    tweets = soup.select('.timeline-item')
+            soup = BeautifulSoup(response.text, 'html.parser')
+            tweets = soup.select('.timeline-item')
 
-    if tweets:
-        first = tweets[0]
-        link = 'https://twitter.com' + first.select_one('a.tweet-link')['href']
-        content = first.select_one('.tweet-content').text.strip()
+            if not tweets:
+                print(f"[INFO] No tweets found on {url}.")
+                continue
 
-        if link != last_post:
-            last_post = link
-            channel = bot.get_channel(CHANNEL_ID)
-            await channel.send(f"📝 新しい投稿がありました！\n{content}\n{link}")
+            first = tweets[0]
+            tweet_link_suffix = first.select_one('a.tweet-link')['href']
+            tweet_url = f"https://twitter.com{tweet_link_suffix}"
+            tweet_content = first.select_one('.tweet-content').text.strip()
+
+            if url not in last_post_urls or tweet_url != last_post_urls[url]:
+                last_post_urls[url] = tweet_url
+                channel = bot.get_channel(CHANNEL_ID)
+                if channel:
+                    await channel.send(f"\u270f\ufe0f [{url.split('/')[-1]}] 新しい投稿がありました！\n{tweet_content}\n{tweet_url}")
+                else:
+                    print("[ERROR] Channel not found")
+            else:
+                print(f"[INFO] No new tweet for {url}.")
+
+        except Exception as e:
+            print(f"[EXCEPTION] ({url}) {e}")
 
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
-    check_nitter.start()
+    fetch_and_post.start()
 
 bot.run(TOKEN)
