@@ -26,7 +26,7 @@ async def fetch_and_post():
     global last_post_urls
     for url in NITTER_URLS:
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
             if response.status_code != 200:
                 print(f"[ERROR] Failed to fetch {url}: {response.status_code}")
                 continue
