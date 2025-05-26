@@ -6,7 +6,7 @@ from discord.ext import tasks, commands
 from flask import Flask
 import threading
 
-# Flask アプリの作成
+# Flask アプリの作成（Renderのヘルスチェック用）
 app = Flask(__name__)
 
 @app.route("/")
@@ -16,22 +16,24 @@ def index():
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
-# 環境変数からトークンとチャンネルIDを取得
+# 環境変数からDiscord BotトークンとチャンネルIDを取得
 TOKEN = os.environ.get("DISCORD_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 
-# 対象NitterアカウントのURLリスト
+# 監視対象のNitterアカウントURL
 NITTER_URLS = [
     "https://nitter.poast.org/CryptoJPTrans",
     "https://nitter.poast.org/angorou7"
 ]
 
-# 各アカウントごとの最新投稿記憶用ディクショナリ
+# 各アカウントごとの最新投稿URL記録
 last_post_urls = {}
 
+# Discord Bot設定
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# 投稿取得・通知処理（60分おき）
 @tasks.loop(minutes=60)
 async def fetch_and_post():
     global last_post_urls
@@ -60,15 +62,19 @@ async def fetch_and_post():
                 last_post_urls[url] = tweet_url
                 channel = bot.get_channel(CHANNEL_ID)
                 if channel:
-                    await channel.send(f"✏️ [{url.split('/')[-1]}] 新しい投稿がありました！\n{tweet_content}\n{tweet_url}")
+                    await channel.send(
+                        f"✏️ [{url.split('/')[-1]}] 新しい投稿がありました！\n{tweet_content}\n{tweet_url}"
+                    )
+                    print(f"[INFO] New tweet posted from {url}")
                 else:
                     print("[ERROR] Channel not found")
             else:
                 print(f"[INFO] No new tweet for {url}.")
 
         except Exception as e:
-            print(f"[EXCEPTION] ({url}) {e}")
+            print(f"[EXCEPTION] Error fetching from {url}: {e}")
 
+# Botログイン時に即時1回実行 → その後ループ開始
 @bot.event
 async def on_ready():
     print(f"[READY] Bot logged in as {bot.user}")
@@ -76,6 +82,7 @@ async def on_ready():
     print("[INFO] fetch_and_post executed manually.")
     fetch_and_post.start()
 
+# Flaskサーバー起動とBot起動を並列で実行
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     bot.run(TOKEN)
