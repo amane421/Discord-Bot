@@ -42,9 +42,8 @@ def fetch_latest_post(account):
         url = f"{base_url}/{account}"
         try:
             res = requests.get(url, headers=headers, timeout=10)
-     　　　   print(f"[DEBUG] {url} status_code: {res.status_code}")
-     　　　   print(f"[DEBUG] {url} content preview: {res.text[:500]}")
-
+        print(f"[DEBUG] {url} status_code: {res.status_code}")
+        print(f"[DEBUG] {url} content preview: {res.text[:500]}")
             if res.status_code != 200:
                 continue
             soup = BeautifulSoup(res.text, 'html.parser')
