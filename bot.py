@@ -75,13 +75,19 @@ async def fetch_and_post():
 
 @bot.event
 async def on_ready():
+    print("=" * 40)
     print(f"[READY] Bot logged in as {bot.user}")
+    print("=" * 40)
+
     try:
-        await fetch_and_post()  # 即時実行
-        fetch_and_post.start()  # ループ開始
-        print("[INFO] fetch_and_post を開始しました")
+        print("[INFO] fetch_and_post を即時実行します")
+        await fetch_and_post()
+        print("[INFO] fetch_and_post 即時実行完了")
+        
+        fetch_and_post.start()
+        print("[INFO] fetch_and_post のループを開始しました")
     except Exception as e:
-        print(f"[EXCEPTION] on_ready 内でのエラー: {e}")
+        print(f"[EXCEPTION] on_ready でのエラー: {e}")
 
 # Bot起動
 try:
