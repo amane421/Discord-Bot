@@ -57,11 +57,20 @@ def fetch_latest_post(user):
             print(f"[DEBUG] ステータスコード: {response.status_code}")
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
+                
+                # 投稿リンク候補1: 古い形式
                 article = soup.find("a", {"class": "tweet-link"})
+                
+                # 投稿リンク候補2: hrefに"/<user>/status"が含まれている最初のaタグ
+                if not article:
+                    article = soup.find("a", href=lambda x: x and f"/{user}/status" in x)
+
                 if article:
                     return f"{base_url}{article.get('href')}"
                 else:
                     print(f"[WARN] 投稿が見つかりませんでした: {url}")
+            else:
+                print(f"[WARN] {url} ステータスコード異常: {response.status_code}")
         except Exception as e:
             print(f"[ERROR] {base_url} へのアクセス失敗: {e}")
     return None
