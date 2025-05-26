@@ -6,7 +6,7 @@ from discord.ext import tasks, commands
 from flask import Flask
 import threading
 
-# Flask アプリの作成（Renderのヘルスチェック用）
+# Flask アプリ作成（Render用）
 app = Flask(__name__)
 
 @app.route("/")
@@ -16,27 +16,28 @@ def index():
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
-# 環境変数からDiscord BotトークンとチャンネルIDを取得
+# 環境変数
 TOKEN = os.environ.get("DISCORD_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 
-# 監視対象のNitterアカウントURL
+# Nitter URLリスト
 NITTER_URLS = [
     "https://nitter.poast.org/CryptoJPTrans",
     "https://nitter.poast.org/angorou7"
 ]
 
-# 各アカウントごとの最新投稿URL記録
+# 投稿記憶
 last_post_urls = {}
 
-# Discord Bot設定
+# Discord Bot初期化
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 投稿取得・通知処理（60分おき）
 @tasks.loop(minutes=60)
 async def fetch_and_post():
     global last_post_urls
+    print("[TASK] Running fetch_and_post loop...")
+
     for url in NITTER_URLS:
         try:
             response = requests.get(url, timeout=10, headers={
@@ -48,7 +49,6 @@ async def fetch_and_post():
 
             soup = BeautifulSoup(response.text, 'html.parser')
             tweets = soup.select('.timeline-item')
-
             if not tweets:
                 print(f"[INFO] No tweets found on {url}.")
                 continue
@@ -65,24 +65,25 @@ async def fetch_and_post():
                     await channel.send(
                         f"✏️ [{url.split('/')[-1]}] 新しい投稿がありました！\n{tweet_content}\n{tweet_url}"
                     )
-                    print(f"[INFO] New tweet posted from {url}")
+                    print(f"[INFO] Sent new tweet from {url}")
                 else:
-                    print("[ERROR] Channel not found")
+                    print("[ERROR] Discord channel not found")
             else:
-                print(f"[INFO] No new tweet for {url}.")
+                print(f"[INFO] No new tweet from {url}")
 
         except Exception as e:
             print(f"[EXCEPTION] Error fetching from {url}: {e}")
 
-# Botログイン時に即時1回実行 → その後ループ開始
 @bot.event
 async def on_ready():
     print(f"[READY] Bot logged in as {bot.user}")
-    await fetch_and_post()
-    print("[INFO] fetch_and_post executed manually.")
-    fetch_and_post.start()
+    try:
+        await fetch_and_post()
+        print("[INFO] fetch_and_post executed manually.")
+        fetch_and_post.start()
+    except Exception as e:
+        print(f"[ERROR] Failed during on_ready execution: {e}")
 
-# Flaskサーバー起動とBot起動を並列で実行
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     bot.run(TOKEN)
