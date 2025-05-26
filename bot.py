@@ -95,7 +95,7 @@ async def fetch_and_post():
                 continue
 
             last_post_urls[account] = latest_post
-            await channel.send(f"🆕 {account} の新規投稿:
+            await channel.send(f"🆕 {account} の新規投稿:\n{title}\n{url}")
 {latest_post}")
 
     except Exception:
