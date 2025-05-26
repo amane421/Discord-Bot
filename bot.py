@@ -42,15 +42,15 @@ def fetch_latest_post(account):
         url = f"{base_url}/{account}"
         try:
             res = requests.get(url, headers=headers, timeout=10)
-        print(f"[DEBUG] {url} status_code: {res.status_code}")
-        print(f"[DEBUG] {url} content preview: {res.text[:500]}")
+            print(f"[DEBUG] {url} status_code: {res.status_code}")
             if res.status_code != 200:
                 continue
             soup = BeautifulSoup(res.text, 'html.parser')
             a_tag = soup.select_one('a[href^="/' + account + '/status/"]')
             if a_tag:
                 return base_url + a_tag['href']
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] {url} の取得に失敗しました: {e}")
             continue
     return None
 
