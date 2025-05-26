@@ -6,9 +6,9 @@ from discord.ext import tasks, commands
 
 # 環境変数からトークンとチャンネルIDを取得
 TOKEN = os.environ.get("DISCORD_TOKEN")
-CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID"))  # 環境変数名の確認
+CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID"))
 
-# 対象NitterアカウントのURLリスト
+# Nitter アカウントのURLリスト
 NITTER_URLS = [
     "https://nitter.poast.org/CryptoJPTrans",
     "https://nitter.poast.org/angorou7"
@@ -25,12 +25,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def fetch_and_post():
     print("[TASK] fetch_and_post 実行開始")
 
-    # チャンネル取得
-    channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        print("[ERROR] Discordチャンネルが見つかりませんでした")
+    try:
+        channel = bot.get_channel(CHANNEL_ID)
+        if not channel:
+            print(f"[ERROR] チャンネルID {CHANNEL_ID} が見つかりません。")
+            return
+        print(f"[INFO] チャンネル取得成功: {channel.name}")
+    except Exception as e:
+        print(f"[EXCEPTION] チャンネル取得エラー: {e}")
         return
-    print(f"[INFO] チャンネル取得成功: {channel.name}")
 
     for url in NITTER_URLS:
         print(f"[CHECK] {url} の投稿チェック開始")
@@ -51,21 +54,18 @@ async def fetch_and_post():
             content = first.select_one('.tweet-content')
 
             if not link or not content:
-                print(f"[WARN] {url}: 必要な要素が見つかりません")
+                print(f"[WARN] {url}: 必要な要素が見つかりません（link: {link}, content: {content}）")
                 continue
 
             tweet_url = f"https://twitter.com{link['href']}"
             tweet_text = content.text.strip()
 
-            if url not in last_post_urls:
-                print(f"[INIT] {url}: 初回読み込みとしてURLを記録")
-                last_post_urls[url] = tweet_url
-                continue
+            user = url.split('/')[-1]
+            is_new_post = tweet_url != last_post_urls.get(url)
 
-            if tweet_url != last_post_urls[url]:
-                print(f"[NEW] 新規投稿検出: {tweet_url}")
+            if is_new_post:
+                print(f"[NEW] 新規投稿検出 or 初回通知: {tweet_url}")
                 last_post_urls[url] = tweet_url
-                user = url.split('/')[-1]
                 await channel.send(f"📝 [{user}] 新しい投稿がありました！\n{tweet_text}\n{tweet_url}")
             else:
                 print(f"[INFO] {url}: 新しい投稿はありません")
@@ -76,8 +76,15 @@ async def fetch_and_post():
 @bot.event
 async def on_ready():
     print(f"[READY] Bot logged in as {bot.user}")
-    await fetch_and_post()  # 🔹 起動時に即時実行
-    fetch_and_post.start()  # 🔹 以降はループで60分ごとに実行
+    try:
+        await fetch_and_post()  # 即時実行
+        fetch_and_post.start()  # ループ開始
+        print("[INFO] fetch_and_post を開始しました")
+    except Exception as e:
+        print(f"[EXCEPTION] on_ready 内でのエラー: {e}")
 
 # Bot起動
-bot.run(TOKEN)
+try:
+    bot.run(TOKEN)
+except Exception as e:
+    print(f"[EXCEPTION] Bot起動失敗: {e}")
