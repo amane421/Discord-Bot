@@ -1,106 +1,82 @@
 import os
-import discord
-from discord.ext import commands, tasks
-from flask import Flask
 import requests
 from bs4 import BeautifulSoup
-import asyncio
+import discord
+from discord.ext import tasks, commands
 
-# Flaskサーバーの起動（Render用）
-app = Flask(__name__)
+# 環境変数からトークンとチャンネルIDを取得
+TOKEN = os.environ.get("DISCORD_TOKEN")
+CHANNEL_ID = int(os.environ.get("DISCORD_CHANNEL_ID"))  # 環境変数名の確認
 
-@app.route('/')
-def index():
-    return "Bot is running!"
+# 対象NitterアカウントのURLリスト
+NITTER_URLS = [
+    "https://nitter.poast.org/CryptoJPTrans",
+    "https://nitter.poast.org/angorou7"
+]
 
-# トークンの取得
-TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
-CHANNEL_ID = int(os.environ.get('DISCORD_CHANNEL_ID'))
+# 各アカウントの最新投稿URLを記録
+last_post_urls = {}
 
-# Intentsの設定
+# Bot初期化
 intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True  # ←これがないとメッセージ取得できない
-intents.guilds = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Botの定義
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-# ニュース取得関数
-def get_crypto_news():
-    print("[DEBUG] get_crypto_news() called")  # ← ログ追加
-
-    url = 'https://coinpost.jp/'
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch news: {e}")
-        return "ニュースの取得に失敗しました。"
-
-    soup = BeautifulSoup(response.content, 'html.parser')
-    news_items = soup.select('.articleList .catLabel + a')[:3]
-
-    if not news_items:
-        print("[WARNING] No news items found on the page.")
-        return "最新のニュースが見つかりませんでした。"
-
-    news_list = ["【最新ニュース】"]
-    for item in news_items:
-        title = item.text.strip()
-        link = item.get('href')
-        if link and not link.startswith("http"):
-            link = "https://coinpost.jp" + link
-        news_list.append(f"{title}\n{link}")
-
-    result = "\n\n".join(news_list)
-    print(f"[DEBUG] News scraped:\n{result}")
-    return result
-
-# ニュースを定期投稿するタスク
 @tasks.loop(minutes=60)
 async def fetch_and_post():
-    print("[DEBUG] fetch_and_post() called")  # ← タスク起動確認
-    try:
-        channel = bot.get_channel(CHANNEL_ID)
-        if channel is None:
-            print(f"[ERROR] Channel ID {CHANNEL_ID} not found.")
-            return
-        news = get_crypto_news()
-        await channel.send(news)
-        print("[INFO] News posted successfully.")
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch and post news: {e}")
+    print("[TASK] fetch_and_post 実行開始")
 
-# Bot起動時の処理
+    # チャンネル取得
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        print("[ERROR] Discordチャンネルが見つかりませんでした")
+        return
+    print(f"[INFO] チャンネル取得成功: {channel.name}")
+
+    for url in NITTER_URLS:
+        print(f"[CHECK] {url} の投稿チェック開始")
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                print(f"[ERROR] {url} の取得に失敗: {response.status_code}")
+                continue
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            tweets = soup.select('.timeline-item')
+            if not tweets:
+                print(f"[INFO] {url}: ツイートが見つかりませんでした")
+                continue
+
+            first = tweets[0]
+            link = first.select_one('a.tweet-link')
+            content = first.select_one('.tweet-content')
+
+            if not link or not content:
+                print(f"[WARN] {url}: 必要な要素が見つかりません")
+                continue
+
+            tweet_url = f"https://twitter.com{link['href']}"
+            tweet_text = content.text.strip()
+
+            if url not in last_post_urls:
+                print(f"[INIT] {url}: 初回読み込みとしてURLを記録")
+                last_post_urls[url] = tweet_url
+                continue
+
+            if tweet_url != last_post_urls[url]:
+                print(f"[NEW] 新規投稿検出: {tweet_url}")
+                last_post_urls[url] = tweet_url
+                user = url.split('/')[-1]
+                await channel.send(f"📝 [{user}] 新しい投稿がありました！\n{tweet_text}\n{tweet_url}")
+            else:
+                print(f"[INFO] {url}: 新しい投稿はありません")
+
+        except Exception as e:
+            print(f"[EXCEPTION] {url}: {e}")
+
 @bot.event
 async def on_ready():
-    try:
-        print(f"[READY] Logged in as {bot.user}")  # ← ログイン確認
-    except Exception as e:
-        print(f"[CRITICAL] failed to print READY: {e}")
+    print(f"[READY] Bot logged in as {bot.user}")
+    fetch_and_post.start()
 
-    try:
-        print("[DEBUG] Calling fetch_and_post() manually")
-        await fetch_and_post()
-        print("[INFO] fetch_and_post() executed manually")
-    except Exception as e:
-        print(f"[ERROR] fetch_and_post() failed on startup: {e}")
-
-    try:
-        fetch_and_post.start()
-        print("[INFO] fetch_and_post() loop started")
-    except Exception as e:
-        print(f"[ERROR] fetch_and_post.start() failed: {e}")
-
-# FlaskとDiscordの同時実行
-async def run_bot():
-    loop = asyncio.get_event_loop()
-    loop.create_task(bot.start(TOKEN))
-    app.run(host="0.0.0.0", port=8080)
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(run_bot())
-    except Exception as e:
-        print(f"[CRITICAL] Failed to start bot: {e}")
+# Bot起動
+bot.run(TOKEN)
