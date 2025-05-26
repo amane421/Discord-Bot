@@ -72,6 +72,8 @@ async def fetch_and_post():
 @bot.event
 async def on_ready():
     print(f"[READY] Bot logged in as {bot.user}")
+    await fetch_and_post()
+    print("[INFO] fetch_and_post executed manually.")
     fetch_and_post.start()
 
 if __name__ == "__main__":
