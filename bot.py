@@ -20,27 +20,26 @@ def run_flask():
 TOKEN = os.environ.get("DISCORD_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 
-# 対象NitterアカウントのURLリスト
+# NitterアカウントのURLリスト
 NITTER_URLS = [
     "https://nitter.poast.org/CryptoJPTrans",
     "https://nitter.poast.org/angorou7"
 ]
 
-# 各アカウントごとの最新投稿記憶用ディクショナリ
+# 最新投稿の保存用
 last_post_urls = {}
 
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @tasks.loop(minutes=60)
 async def fetch_and_post():
     global last_post_urls
-    print("[TASK] fetch_and_post triggered")
     for url in NITTER_URLS:
         try:
-            print(f"[FETCH] Trying to fetch: {url}")
             response = requests.get(url, timeout=10, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0"
             })
             if response.status_code != 200:
                 print(f"[ERROR] Failed to fetch {url}: {response.status_code}")
@@ -50,7 +49,7 @@ async def fetch_and_post():
             tweets = soup.select('.timeline-item')
 
             if not tweets:
-                print(f"[INFO] No tweets found on {url}.")
+                print(f"[INFO] No tweets found on {url}")
                 continue
 
             first = tweets[0]
@@ -60,14 +59,14 @@ async def fetch_and_post():
 
             if url not in last_post_urls or tweet_url != last_post_urls[url]:
                 last_post_urls[url] = tweet_url
-                channel = bot.get_channel(CHANNEL_ID)
+                channel = await bot.fetch_channel(CHANNEL_ID)  # ← ここ修正
                 if channel:
                     await channel.send(f"✏️ [{url.split('/')[-1]}] 新しい投稿がありました！\n{tweet_content}\n{tweet_url}")
-                    print(f"[POSTED] {tweet_url} posted to Discord")
+                    print(f"[POSTED] {url} -> {tweet_url}")
                 else:
-                    print("[ERROR] Channel not found")
+                    print(f"[ERROR] Channel not found (ID: {CHANNEL_ID})")
             else:
-                print(f"[INFO] No new tweet for {url}.")
+                print(f"[SKIPPED] No new tweet for {url}")
 
         except Exception as e:
             print(f"[EXCEPTION] ({url}) {e}")
@@ -75,8 +74,11 @@ async def fetch_and_post():
 @bot.event
 async def on_ready():
     print(f"[READY] Bot logged in as {bot.user}")
-    await fetch_and_post()
-    print("[INFO] fetch_and_post executed once at startup.")
+    try:
+        await fetch_and_post()
+        print("[INFO] fetch_and_post executed manually.")
+    except Exception as e:
+        print(f"[ERROR] fetch_and_post failed: {e}")
     fetch_and_post.start()
 
 if __name__ == "__main__":
