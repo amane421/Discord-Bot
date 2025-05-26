@@ -29,8 +29,9 @@ NITTER_URLS = [
 # 各アカウントごとの最新投稿記憶用ディクショナリ
 last_post_urls = {}
 
-# Discord Botのセットアップ
+# Intents の設定（message_content を明示的に有効化）
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @tasks.loop(minutes=60)
@@ -61,7 +62,9 @@ async def fetch_and_post():
                 last_post_urls[url] = tweet_url
                 channel = bot.get_channel(CHANNEL_ID)
                 if channel:
-                    await channel.send(f"✏️ [{url.split('/')[-1]}] 新しい投稿がありました！\n{tweet_content}\n{tweet_url}")
+                    await channel.send(
+                        f"✏️ [{url.split('/')[-1]}] 新しい投稿がありました！\n{tweet_content}\n{tweet_url}"
+                    )
                     print(f"[INFO] Posted new tweet from {url}")
                 else:
                     print("[ERROR] Channel not found")
@@ -69,18 +72,15 @@ async def fetch_and_post():
                 print(f"[INFO] No new tweet for {url}.")
 
         except Exception as e:
-            print(f"[EXCEPTION] Error fetching from {url}: {e}")
+            print(f"[EXCEPTION] ({url}) {e}")
 
 @bot.event
 async def on_ready():
     print(f"[READY] Bot logged in as {bot.user}")
-    try:
-        await fetch_and_post()
-        print("[INFO] fetch_and_post executed manually.")
-        fetch_and_post.start()
-        print("[INFO] fetch_and_post loop started.")
-    except Exception as e:
-        print(f"[ERROR] on_ready execution failed: {e}")
+    # 起動直後に1回実行
+    await fetch_and_post()
+    print("[INFO] fetch_and_post executed once at startup.")
+    fetch_and_post.start()
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
