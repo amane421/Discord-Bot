@@ -76,7 +76,8 @@ async def fetch_and_post():
 @bot.event
 async def on_ready():
     print(f"[READY] Bot logged in as {bot.user}")
-    fetch_and_post.start()
+    await fetch_and_post()  # 🔹 起動時に即時実行
+    fetch_and_post.start()  # 🔹 以降はループで60分ごとに実行
 
 # Bot起動
 bot.run(TOKEN)
