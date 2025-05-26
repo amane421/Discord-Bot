@@ -45,10 +45,19 @@ def fetch_latest_post(account):
             print(f"[DEBUG] {url} status_code: {res.status_code}")
             if res.status_code != 200:
                 continue
+
             soup = BeautifulSoup(res.text, 'html.parser')
-            a_tag = soup.select_one('a[href^="/' + account + '/status/"]')
+
+            # 投稿リンクを抽出
+            a_tag = soup.select_one(f'a[href^="/{account}/status/"]')
+
             if a_tag:
-                return base_url + a_tag['href']
+                tweet_url = base_url + a_tag['href']
+                print(f"[DEBUG] {account} の投稿リンク抽出成功: {tweet_url}")
+                return tweet_url
+            else:
+                print(f"[WARN] {account} の投稿リンクが見つかりませんでした")
+
         except Exception as e:
             print(f"[ERROR] {url} の取得に失敗しました: {e}")
             continue
