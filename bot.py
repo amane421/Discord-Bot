@@ -23,11 +23,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 NITTER_INSTANCES = [
     "https://nitter.tiekoetter.com",
     "https://nitter.privacyredirect.com",
-    "https://nitter.poast.org",
-    "https://nitter.net",
     "https://nitter.it",
-    "https://nitter.42l.fr",
-    "https://nitter.pussthecat.org"
+    "https://nitter.unixfox.eu",
+    "https://nitter.namazso.eu",
+    "https://nitter.fdn.fr",
+    "https://nitter.1d4.us",
+    "https://nitter.kavin.rocks",
+    "https://nitter.domain.glass"
 ]
 
 # 監視対象のアカウント
@@ -36,10 +38,16 @@ TARGET_ACCOUNTS = ["CryptoJPTrans", "angorou7"]
 # 最新投稿URLの保存辞書
 last_post_urls = {account: None for account in TARGET_ACCOUNTS}
 
-def fetch_latest_post(account, max_retries=3):
+def fetch_latest_post(account, max_retries=3, debug_mode=False):
     """アカウントの最新投稿を取得"""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
     
     for base_url in NITTER_INSTANCES:
@@ -54,12 +62,46 @@ def fetch_latest_post(account, max_retries=3):
                 if res.status_code == 200:
                     soup = BeautifulSoup(res.text, 'html.parser')
                     
-                    # 複数のセレクタパターンを試行
+                    # デバッグモード: HTMLの構造を確認
+                    if debug_mode:
+                        logger.info(f"=== DEBUG: HTML structure for {account} on {base_url} ===")
+                        # タイトルを確認
+                        title = soup.find('title')
+                        logger.info(f"Page title: {title.text if title else 'No title'}")
+                        
+                        # 全てのリンクを確認
+                        all_links = soup.find_all('a', href=True)
+                        status_links = [link for link in all_links if '/status/' in link.get('href', '')]
+                        logger.info(f"Found {len(status_links)} status links")
+                        
+                        for i, link in enumerate(status_links[:3]):  # 最初の3つだけ表示
+                            logger.info(f"Status link {i+1}: {link.get('href')} - Text: {link.get_text()[:50]}")
+                        
+                        # よく使われるクラス名を確認
+                        tweet_containers = soup.find_all(['div', 'article'], class_=True)
+                        unique_classes = set()
+                        for container in tweet_containers:
+                            if container.get('class'):
+                                unique_classes.update(container.get('class'))
+                        logger.info(f"Found classes: {sorted(list(unique_classes))[:10]}")  # 最初の10個
+                    
+                    # より包括的なセレクタパターンを試行
                     selectors = [
-                        'div.tweet-body a[href*="/status/"]',
-                        'article .tweet-link',
+                        # 一般的なNitterセレクタ
+                        '.tweet-link[href*="/status/"]',
+                        'a.tweet-link[href*="/status/"]',
                         '.timeline-item .tweet-link',
-                        'a[href*="/status/"]'
+                        'div.tweet-body a[href*="/status/"]',
+                        '.tweet-header a[href*="/status/"]',
+                        
+                        # より広範なセレクタ
+                        'a[href*="/status/"]',
+                        '[href*="/status/"]',
+                        
+                        # 特定のNitterバージョン対応
+                        '.main-tweet a[href*="/status/"]',
+                        '.tweet a[href*="/status/"]',
+                        'article a[href*="/status/"]'
                     ]
                     
                     for selector in selectors:
@@ -68,9 +110,20 @@ def fetch_latest_post(account, max_retries=3):
                             # 最初の（最新の）投稿リンクを返す
                             href = link_tags[0].get('href')
                             if href and '/status/' in href:
-                                full_url = base_url + href if href.startswith('/') else href
-                                logger.info(f"Found post for {account}: {full_url}")
+                                # 相対URLを絶対URLに変換
+                                if href.startswith('/'):
+                                    full_url = base_url + href
+                                elif href.startswith('http'):
+                                    full_url = href
+                                else:
+                                    full_url = base_url + '/' + href
+                                
+                                logger.info(f"Found post for {account} using selector '{selector}': {full_url}")
                                 return full_url
+                    
+                    # デバッグ情報: HTMLの一部を出力
+                    if debug_mode:
+                        logger.info(f"HTML snippet (first 1000 chars): {res.text[:1000]}")
                     
                     logger.warning(f"No post links found for {account} on {base_url}")
                 else:
@@ -91,7 +144,7 @@ def fetch_latest_post(account, max_retries=3):
     logger.error(f"Failed to fetch latest post for {account} from all instances")
     return None
 
-async def check_and_post_updates():
+async def check_and_post_updates(debug_mode=False):
     """新規投稿をチェックしてDiscordに送信"""
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
@@ -105,7 +158,7 @@ async def check_and_post_updates():
     for account in TARGET_ACCOUNTS:
         try:
             logger.info(f"Checking {account}...")
-            latest_post = fetch_latest_post(account)
+            latest_post = fetch_latest_post(account, debug_mode=debug_mode)
             
             if latest_post and last_post_urls[account] != latest_post:
                 logger.info(f"New post found for {account}: {latest_post}")
@@ -144,8 +197,9 @@ async def before_periodic_check():
 async def on_ready():
     logger.info(f"Bot logged in as {bot.user} (ID: {bot.user.id})")
     
-    # 初回チェック実行
-    await check_and_post_updates()
+    # 初回チェック実行（デバッグモード有効）
+    logger.info("Running initial check with debug mode enabled...")
+    await check_and_post_updates(debug_mode=True)
     
     # 定期チェック開始
     if not periodic_check.is_running():
@@ -161,6 +215,45 @@ async def check(ctx):
         await ctx.send("✅ チェック完了！")
     else:
         await ctx.send("❌ このコマンドは管理者のみ使用できます。")
+
+# デバッグモードでのチェックコマンド
+@bot.command()
+async def debug_check(ctx):
+    """デバッグモードで投稿チェックを実行"""
+    if ctx.author.guild_permissions.administrator:
+        await ctx.send("🔍 デバッグモードでチェックを開始します...")
+        await check_and_post_updates(debug_mode=True)
+        await ctx.send("✅ デバッグチェック完了！ログを確認してください。")
+    else:
+        await ctx.send("❌ このコマンドは管理者のみ使用できます。")
+
+# 特定アカウントのデバッグ
+@bot.command()
+async def debug_account(ctx, account=None):
+    """特定アカウントのHTMLを詳細デバッグ"""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ このコマンドは管理者のみ使用できます。")
+        return
+    
+    if not account:
+        await ctx.send("使用方法: `!debug_account [アカウント名]`")
+        return
+    
+    if account not in TARGET_ACCOUNTS:
+        await ctx.send(f"❌ `{account}` は監視対象ではありません。対象: {', '.join(TARGET_ACCOUNTS)}")
+        return
+    
+    await ctx.send(f"🔍 {account} のデバッグを開始します...")
+    
+    try:
+        result = fetch_latest_post(account, debug_mode=True)
+        if result:
+            await ctx.send(f"✅ 投稿が見つかりました: {result}")
+        else:
+            await ctx.send("❌ 投稿が見つかりませんでした。ログを確認してください。")
+    except Exception as e:
+        await ctx.send(f"❌ エラーが発生しました: {str(e)}")
+        logger.error(f"Debug command error: {e}")
 
 # ステータスコマンド
 @bot.command()
