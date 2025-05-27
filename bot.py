@@ -113,7 +113,7 @@ class TwitterAPI:
                     elif response.status == 429:
                         logger.error("Rate limit exceeded from Twitter API")
                         # レート制限に達した場合、より長く待機
-                        await asyncio.sleep(60)
+                        await asyncio.sleep(300)  # 5分待機
                         return None
                     elif response.status == 401:
                         logger.error("Invalid Twitter Bearer Token")
@@ -171,7 +171,7 @@ class TwitterAPI:
                     elif response.status == 429:
                         logger.error("Rate limit exceeded from Twitter API")
                         # レート制限に達した場合、より長く待機
-                        await asyncio.sleep(60)
+                        await asyncio.sleep(300)  # 5分待機
                         return []
                     elif response.status == 401:
                         logger.error("Invalid Twitter Bearer Token")
@@ -218,10 +218,11 @@ async def initialize_user_ids():
     """起動時にユーザーIDを取得"""
     logger.info(f"Initializing user IDs for accounts: {list(TARGET_ACCOUNTS.keys())}")
     
-    # 初期化前に少し待機
-    await asyncio.sleep(5)
-    
     for username in TARGET_ACCOUNTS:
+        if TARGET_ACCOUNTS[username] is not None:
+            logger.info(f"User ID for {username} already initialized: {TARGET_ACCOUNTS[username]}")
+            continue
+            
         try:
             user_id = await twitter_api.get_user_id(username)
             if user_id:
@@ -230,8 +231,7 @@ async def initialize_user_ids():
             else:
                 logger.error(f"❌ Failed to get user ID for {username}")
             
-            # ユーザーID取得間の待機時間を延長（レート制限対策）
-            await asyncio.sleep(10)
+            # ユーザーID取得間の待機時間（レート制限を考慮して待機しない、RateLimiterが管理）
         except Exception as e:
             logger.error(f"Error initializing {username}: {e}")
 
@@ -244,7 +244,19 @@ async def check_and_post_updates():
         logger.error(f"Discord channel not found (ID: {CHANNEL_ID})")
         return
     
+    # チャンネル権限チェック
+    bot_member = channel.guild.get_member(bot.user.id)
+    if bot_member and not channel.permissions_for(bot_member).send_messages:
+        logger.error(f"❌ Bot doesn't have permission to send messages in channel {CHANNEL_ID}")
+        logger.error(f"Please grant 'Send Messages' and 'Embed Links' permissions to the bot in this channel")
+        return
+    
     logger.info("Checking for new tweets (rate-limited)...")
+    
+    # 初回実行時のみユーザーIDを初期化
+    if None in TARGET_ACCOUNTS.values():
+        logger.info("Some accounts not initialized, initializing now...")
+        await initialize_user_ids()
     
     active_accounts = {k: v for k, v in TARGET_ACCOUNTS.items() if v is not None}
     logger.info(f"Active accounts: {len(active_accounts)}/{len(TARGET_ACCOUNTS)}")
@@ -281,35 +293,42 @@ async def check_and_post_updates():
                 for tweet in reversed(new_tweets):
                     logger.info(f"🆕 New tweet found for {username}: {tweet['id']}")
                     
-                    # Discord埋め込み
-                    embed = discord.Embed(
-                        description=tweet["text"],
-                        color=0x1DA1F2
-                    )
-                    
-                    # 画像がある場合は最初の画像を表示
-                    if tweet.get('media_info'):
-                        for media in tweet['media_info']:
-                            if media['type'] == 'photo' and 'url' in media:
-                                embed.set_image(url=media['url'])
-                                break
-                            elif media['type'] == 'video' and 'preview_image_url' in media:
-                                embed.set_image(url=media['preview_image_url'])
-                                break
-                    
-                    await channel.send(embed=embed)
-                    logger.info(f"✅ Posted update for {username} to Discord")
-                    
-                    # 連続投稿の間隔を空ける
-                    await asyncio.sleep(2)
+                    try:
+                        # Discord埋め込み
+                        embed = discord.Embed(
+                            description=tweet["text"],
+                            color=0x1DA1F2,
+                            timestamp=datetime.utcnow()
+                        )
+                        embed.set_author(name=f"@{username}", url=f"https://twitter.com/{username}")
+                        embed.add_field(name="ツイートを見る", value=f"[リンク](https://twitter.com/{username}/status/{tweet['id']})", inline=False)
+                        
+                        # 画像がある場合は最初の画像を表示
+                        if tweet.get('media_info'):
+                            for media in tweet['media_info']:
+                                if media['type'] == 'photo' and 'url' in media:
+                                    embed.set_image(url=media['url'])
+                                    break
+                                elif media['type'] == 'video' and 'preview_image_url' in media:
+                                    embed.set_image(url=media['preview_image_url'])
+                                    break
+                        
+                        await channel.send(embed=embed)
+                        logger.info(f"✅ Posted update for {username} to Discord")
+                        
+                        # 連続投稿の間隔を空ける
+                        await asyncio.sleep(2)
+                    except discord.Forbidden:
+                        logger.error("❌ Permission denied: Cannot send messages to this channel")
+                        logger.error("Please check bot permissions in Discord")
+                        return
+                    except Exception as e:
+                        logger.error(f"Error posting to Discord: {e}")
                 
                 if not new_tweets:
                     logger.info(f"No new tweets for {username}")
             else:
                 logger.warning(f"No tweets found for {username}")
-            
-            # アカウント間で待機（レート制限考慮）
-            await asyncio.sleep(10)
                 
         except Exception as e:
             logger.error(f"Error checking {username}: {e}")
@@ -323,11 +342,11 @@ async def periodic_check():
 @periodic_check.before_loop
 async def before_periodic_check():
     await bot.wait_until_ready()
-    await initialize_user_ids()
     
-    # 初期化完了後、より長く待機
-    logger.info("Initialization complete. Waiting before starting periodic checks...")
-    await asyncio.sleep(60)  # 60秒待機
+    # 初期化を遅延実行（レート制限対策）
+    logger.info("Waiting 30 seconds before first check to stabilize connection...")
+    await asyncio.sleep(30)  # 30秒待機
+    
     logger.info("Twitter API bot is ready, starting periodic checks...")
 
 @bot.event
@@ -398,6 +417,46 @@ async def rate_status(ctx):
     
     await ctx.send(embed=embed)
 
+# 権限チェックコマンド
+@bot.command()
+async def check_permissions(ctx):
+    """Bot権限の確認"""
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        await ctx.send("❌ 指定されたチャンネルが見つかりません。")
+        return
+    
+    bot_member = channel.guild.get_member(bot.user.id)
+    if not bot_member:
+        await ctx.send("❌ Botがサーバーに参加していません。")
+        return
+    
+    permissions = channel.permissions_for(bot_member)
+    
+    embed = discord.Embed(title="🔐 Bot権限チェック", color=0x00ff00 if permissions.send_messages else 0xff0000)
+    embed.add_field(name="チャンネル", value=f"{channel.mention}", inline=False)
+    
+    required_perms = {
+        "メッセージを送信": permissions.send_messages,
+        "埋め込みリンク": permissions.embed_links,
+        "メッセージを読む": permissions.read_messages,
+        "メッセージ履歴を読む": permissions.read_message_history
+    }
+    
+    for perm_name, has_perm in required_perms.items():
+        status = "✅" if has_perm else "❌"
+        embed.add_field(name=perm_name, value=status, inline=True)
+    
+    if not all(required_perms.values()):
+        embed.add_field(
+            name="⚠️ 権限不足",
+            value="Botに必要な権限を付与してください。\n"
+                  "サーバー設定 → 連携サービス → Bot → 権限を編集",
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+
 # 使用量計算表示コマンド
 @bot.command()
 async def usage(ctx):
@@ -452,20 +511,6 @@ async def usage(ctx):
         value=f"15分あたり: {rate_limit_per_15min}リクエスト\n"
               f"月間ツイート: {monthly_tweet_limit:,}件\n"
               f"**現在の設定は制限内です**" if monthly_tweets < monthly_tweet_limit else "**⚠️ 制限超過の恐れ**",
-        inline=False
-    )
-    
-    # 最大効率の計算
-    max_daily_requests = (24 * 60 / 15) * rate_limit_per_15min  # 15分ごとに10リクエスト
-    max_monthly_tweets_by_rate = max_daily_requests * 30 * tweets_per_request
-    actual_limit = min(max_monthly_tweets_by_rate, monthly_tweet_limit)
-    
-    embed.add_field(
-        name="💡 最適化のヒント",
-        value=f"理論上の最大効率:\n"
-              f"• 1日最大{max_daily_requests:.0f}リクエスト可能\n"
-              f"• ただし月間{monthly_tweet_limit:,}ツイート制限により\n"
-              f"• 実質的に1日約{monthly_tweet_limit/30/tweets_per_request:.0f}リクエストが上限",
         inline=False
     )
     
