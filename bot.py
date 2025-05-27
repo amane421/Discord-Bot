@@ -48,19 +48,13 @@ def fetch_latest_post(account):
 
             soup = BeautifulSoup(res.text, 'html.parser')
 
-            # NitterのHTML構造に合わせた修正（1番上の投稿リンクを拾う）
-            tweet_div = soup.select_one("div.timeline-item")
-            if tweet_div:
-                a_tag = tweet_div.select_one("a[href*='/status/']")
-                if a_tag and 'href' in a_tag.attrs:
-                    tweet_url = base_url + a_tag['href']
-                    print(f"[DEBUG] {account} の投稿リンク抽出成功: {tweet_url}")
-                    return tweet_url
-                else:
-                    print(f"[WARN] {account} の投稿リンクが見つかりませんでした (a_tagなし)")
-            else:
-                print(f"[WARN] {account} の投稿が見つかりませんでした (timeline-itemなし)")
-
+            # より柔軟なセレクタ（div.tweet-body > a[href*="/status/"]）
+            tweet_body = soup.select_one('div.tweet-body')
+            if tweet_body:
+                link_tag = tweet_body.find('a', href=True)
+                if link_tag and '/status/' in link_tag['href']:
+                    return base_url + link_tag['href']
+            print(f"[WARN] {account} の投稿リンクが見つかりませんでした")
         except Exception as e:
             print(f"[ERROR] {url} の取得に失敗しました: {e}")
             continue
