@@ -96,15 +96,15 @@ class TwitterAPI:
             raise ValueError("Bearer token is required")
         self.bearer_token = bearer_token
         self.base_url = "https://api.twitter.com/2"
-        
+
     async def get_user_id(self, username):
         """ユーザー名からユーザーIDを取得"""
         if not await rate_limiter.wait_if_needed():
             return None
-            
+
         url = f"{self.base_url}/users/by/username/{username}"
         headers = {"Authorization": f"Bearer {self.bearer_token}"}
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as response:
@@ -114,7 +114,6 @@ class TwitterAPI:
                         return data["data"]["id"]
                     elif response.status == 429:
                         logger.error("Rate limit exceeded from Twitter API")
-                        # レート制限に達した場合、より長く待機
                         await asyncio.sleep(300)  # 5分待機
                         return None
                     elif response.status == 401:
@@ -131,60 +130,63 @@ class TwitterAPI:
         except Exception as e:
             logger.error(f"Error getting user ID for {username}: {e}")
             return None
-    
-async def get_user_tweets(self, user_id, username, max_results=5):
-    """ユーザーの最新ツイートを取得（画像・メディア対応 + スキップ対応）"""
-    if not await rate_limiter.wait_if_needed():
-        return []
 
-    url = f"{self.base_url}/users/{user_id}/tweets"
-    headers = {"Authorization": f"Bearer {self.bearer_token}"}
-    max_results = max(5, min(max_results, 100))
+    async def get_user_tweets(self, user_id, username, max_results=5):
+        """ユーザーの最新ツイートを取得（画像・メディア対応 + スキップ対応）"""
+        if not await rate_limiter.wait_if_needed():
+            return []
 
-    params = {
-        "max_results": max_results,
-        "tweet.fields": "created_at,attachments",
-        "media.fields": "url,preview_image_url,type",
-        "expansions": "attachments.media_keys",
-        "exclude": "retweets,replies"
-    }
+        url = f"{self.base_url}/users/{user_id}/tweets"
+        headers = {"Authorization": f"Bearer {self.bearer_token}"}
+        max_results = max(5, min(max_results, 100))
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    tweets = data.get("data", [])
-                    media_info = data.get("includes", {}).get("media", [])
+        params = {
+            "max_results": max_results,
+            "tweet.fields": "created_at,attachments",
+            "media.fields": "url,preview_image_url,type",
+            "expansions": "attachments.media_keys",
+            "exclude": "retweets,replies"
+        }
 
-                    for tweet in tweets:
-                        tweet['media_info'] = []
-                        if 'attachments' in tweet and 'media_keys' in tweet['attachments']:
-                            for media_key in tweet['attachments']['media_keys']:
-                                for media in media_info:
-                                    if media['media_key'] == media_key:
-                                        tweet['media_info'].append(media)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        tweets = data.get("data", [])
+                        media_info = data.get("includes", {}).get("media", [])
 
-                    logger.info(f"Retrieved {len(tweets)} tweets for user {user_id}")
-                    return tweets
-                elif response.status == 429:
-                    logger.error("Rate limit exceeded from Twitter API")
-                    skip_until[username] = datetime.utcnow() + timedelta(minutes=15)
-                    logger.warning(f"Temporarily skipping {username} for 15 minutes.")
-                    await asyncio.sleep(300)
-                    return []
-                elif response.status == 401:
-                    logger.error("Invalid Twitter Bearer Token")
-                    return []
-                else:
-                    logger.error(f"Failed to get tweets for user {user_id}: HTTP {response.status}")
-                    response_text = await response.text()
-                    logger.error(f"Response: {response_text}")
-                    return []
-    except Exception as e:
-        logger.error(f"Error getting tweets for user {user_id}: {e}")
-        return []
+                        for tweet in tweets:
+                            tweet['media_info'] = []
+                            if 'attachments' in tweet and 'media_keys' in tweet['attachments']:
+                                for media_key in tweet['attachments']['media_keys']:
+                                    for media in media_info:
+                                        if media['media_key'] == media_key:
+                                            tweet['media_info'].append(media)
 
+                        logger.info(f"Retrieved {len(tweets)} tweets for user {user_id}")
+                        return tweets
+
+                    elif response.status == 429:
+                        logger.error("Rate limit exceeded from Twitter API")
+                        skip_until[username] = datetime.utcnow() + timedelta(minutes=15)
+                        logger.warning(f"Temporarily skipping {username} for 15 minutes.")
+                        await asyncio.sleep(300)
+                        return []
+
+                    elif response.status == 401:
+                        logger.error("Invalid Twitter Bearer Token")
+                        return []
+
+                    else:
+                        logger.error(f"Failed to get tweets for user {user_id}: HTTP {response.status}")
+                        response_text = await response.text()
+                        logger.error(f"Response: {response_text}")
+                        return []
+
+        except Exception as e:
+            logger.error(f"Error getting tweets for user {user_id}: {e}")
+            return []
 
 # 初期化時のエラーハンドリング強化
 def validate_environment():
