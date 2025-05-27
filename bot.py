@@ -8,6 +8,7 @@ from discord.ext import tasks, commands
 import logging
 from datetime import datetime
 import json
+import brotli  # Brotli圧縮サポート
 
 # ログ設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
