@@ -1,328 +1,392 @@
 import os
-import aiohttp
-import asyncio
-import random
-from bs4 import BeautifulSoup
 import discord
 from discord.ext import tasks, commands
+import aiohttp
+import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
-import brotli  # Brotli圧縮サポート
 
 # ログ設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # 環境変数
-TOKEN = os.environ.get("DISCORD_TOKEN")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID")) if os.environ.get("CHANNEL_ID") else None
+TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
+
+# 🎯 監視対象のアカウント（ここを変更してください）
+TARGET_ACCOUNTS = {
+    "CryptoJPTrans": None,  # ← 必要に応じて変更
+    "angorou7": None        # ← 必要に応じて変更
+    # "他のアカウント名": None,  # ← 追加したい場合
+}
 
 # Botインスタンス
 intents = discord.Intents.default()
+intents.message_content = True  # メッセージ内容を読み取るため
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 更新されたNitterインスタンス（動作確認済み）
-NITTER_INSTANCES = [
-    "https://nitter.poast.org",
-    "https://nitter.tiekoetter.com", 
-    "https://nitter.privacyredirect.com",
-    "https://lightbrd.com",  # 新発見
-    "https://nitter.cz",
-    "https://nitter.privacydev.net"
-]
+# 最新ツイートIDの保存
+last_tweet_ids = {account: None for account in TARGET_ACCOUNTS}
 
-# 監視対象アカウント
-TARGET_ACCOUNTS = ["CryptoJPTrans", "angorou7"]
-last_post_urls = {account: None for account in TARGET_ACCOUNTS}
-
-def get_realistic_headers():
-    """リアルなブラウザヘッダーをランダムに生成"""
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
-    ]
+# レート制限管理
+class RateLimiter:
+    def __init__(self):
+        self.requests_per_window = 75  # 15分間に75回
+        self.window_duration = 900    # 15分 = 900秒
+        self.requests = []
+        self.monthly_count = 0
+        self.monthly_limit = 10000
+        self.month_start = datetime.now()
     
-    accept_languages = [
-        "en-US,en;q=0.9",
-        "en-US,en;q=0.9,ja;q=0.8",
-        "en-GB,en;q=0.9",
-        "ja,en-US;q=0.9,en;q=0.8"
-    ]
-    
-    return {
-        "User-Agent": random.choice(user_agents),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": random.choice(accept_languages),
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
-        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"'
-    }
-
-async def fetch_with_stealth(session, url, max_retries=2):
-    """ステルス機能付きでページを取得"""
-    for attempt in range(max_retries):
-        try:
-            # ランダムな遅延（人間らしい行動をシミュレート）
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-            
-            headers = get_realistic_headers()
-            
-            async with session.get(url, headers=headers) as response:
-                logger.info(f"Attempt {attempt + 1} - {url} - Status: {response.status}")
-                
-                if response.status == 200:
-                    text = await response.text()
-                    
-                    # Bot検証ページの検出
-                    bot_indicators = [
-                        "Making sure you're not a bot",
-                        "Just a moment",
-                        "Checking your browser",
-                        "Please wait",
-                        "Ray ID:",
-                        "cloudflare"
-                    ]
-                    
-                    text_lower = text.lower()
-                    if any(indicator.lower() in text_lower for indicator in bot_indicators):
-                        logger.warning(f"Bot verification page detected on {url}")
-                        if attempt < max_retries - 1:
-                            # より長い遅延後にリトライ
-                            await asyncio.sleep(random.uniform(5.0, 10.0))
-                            continue
-                        return None, "bot_verification"
-                    
-                    # 空白ページの検出
-                    if len(text.strip()) < 500:
-                        logger.warning(f"Empty page detected on {url}")
-                        return None, "empty_page"
-                    
-                    # 成功
-                    logger.info(f"Successfully fetched {url} ({len(text)} chars)")
-                    return text, "success"
-                    
-                elif response.status == 403:
-                    logger.warning(f"403 Forbidden for {url}")
-                    return None, "forbidden"
-                elif response.status == 429:
-                    logger.warning(f"Rate limited for {url}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(random.uniform(10.0, 20.0))
-                        continue
-                    return None, "rate_limited"
-                else:
-                    logger.warning(f"HTTP {response.status} for {url}")
-                    return None, f"http_{response.status}"
-                    
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout for {url}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(random.uniform(2.0, 5.0))
-                continue
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(random.uniform(2.0, 5.0))
-                continue
-    
-    return None, "failed"
-
-async def fetch_latest_post(account, debug_mode=False):
-    """アカウントの最新投稿を取得（ステルス機能付き）"""
-    # より長いタイムアウトとConnection pool設定
-    timeout = aiohttp.ClientTimeout(total=15, connect=10)
-    
-    # TCPコネクタの設定（より現実的な接続）
-    connector = aiohttp.TCPConnector(
-        limit=10,
-        limit_per_host=2,
-        keepalive_timeout=30,
-        enable_cleanup_closed=True
-    )
-    
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        connector=connector,
-        cookie_jar=aiohttp.CookieJar()  # Cookieを保持
-    ) as session:
+    async def wait_if_needed(self):
+        """必要に応じて待機"""
+        now = datetime.now()
         
-        for base_url in NITTER_INSTANCES:
-            url = f"{base_url}/{account}"
-            logger.info(f"Trying {url}")
-            
-            # インスタンス間でランダムな遅延
-            await asyncio.sleep(random.uniform(2.0, 5.0))
-            
-            text, status = await fetch_with_stealth(session, url)
-            
-            if text:
-                soup = BeautifulSoup(text, 'html.parser')
-                
-                if debug_mode:
-                    logger.info(f"=== DEBUG: {account} on {base_url} ===")
-                    title = soup.find('title')
-                    logger.info(f"Page title: {title.text if title else 'No title'}")
-                
-                # 包括的なセレクタパターン
-                selectors = [
-                    '.tweet-link[href*="/status/"]',
-                    'a.tweet-link',
-                    '.timeline-item .tweet-link',
-                    'div.tweet-body a[href*="/status/"]',
-                    'a[href*="/status/"]',
-                    '.main-tweet a[href*="/status/"]',
-                    '.tweet a[href*="/status/"]',
-                    'article a[href*="/status/"]',
-                    '.timeline-tweet a[href*="/status/"]'
-                ]
-                
-                for selector in selectors:
-                    links = soup.select(selector)
-                    for link in links:
-                        href = link.get('href')
-                        if href and '/status/' in href:
-                            # 絶対URLに変換
-                            if href.startswith('/'):
-                                full_url = base_url + href
-                            elif href.startswith('http'):
-                                full_url = href
-                            else:
-                                full_url = f"{base_url}/{href}"
-                            
-                            logger.info(f"Found post for {account}: {full_url}")
-                            return full_url
-                
-                logger.warning(f"No status links found for {account} on {base_url}")
-            else:
-                logger.warning(f"Failed to fetch {account} from {base_url}: {status}")
-    
-    logger.error(f"Failed to fetch latest post for {account} from all instances")
-    return None
+        # 月間制限チェック
+        if (now - self.month_start).days >= 30:
+            self.monthly_count = 0
+            self.month_start = now
+        
+        if self.monthly_count >= self.monthly_limit:
+            logger.error("Monthly limit exceeded! Waiting until next month...")
+            return False
+        
+        # 15分間のウィンドウをクリア
+        cutoff = now - timedelta(seconds=self.window_duration)
+        self.requests = [req_time for req_time in self.requests if req_time > cutoff]
+        
+        # レート制限チェック
+        if len(self.requests) >= self.requests_per_window:
+            sleep_time = self.window_duration - (now - self.requests[0]).total_seconds()
+            if sleep_time > 0:
+                logger.warning(f"Rate limit reached. Waiting {sleep_time:.1f} seconds...")
+                await asyncio.sleep(sleep_time)
+                return await self.wait_if_needed()
+        
+        # リクエストを記録
+        self.requests.append(now)
+        self.monthly_count += 1
+        logger.info(f"API Request #{self.monthly_count}/10000 this month")
+        return True
 
-async def check_and_post_updates(debug_mode=False):
-    """新規投稿をチェックしてDiscordに送信"""
+class TwitterAPI:
+    def __init__(self, bearer_token):
+        if not bearer_token:
+            raise ValueError("Bearer token is required")
+        self.bearer_token = bearer_token
+        self.base_url = "https://api.twitter.com/2"
+        
+    async def get_user_id(self, username):
+        """ユーザー名からユーザーIDを取得"""
+        if not await rate_limiter.wait_if_needed():
+            return None
+            
+        url = f"{self.base_url}/users/by/username/{username}"
+        headers = {"Authorization": f"Bearer {self.bearer_token}"}
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        logger.info(f"Got user ID for {username}: {data['data']['id']}")
+                        return data["data"]["id"]
+                    elif response.status == 429:
+                        logger.error("Rate limit exceeded from Twitter API")
+                        return None
+                    elif response.status == 401:
+                        logger.error("Invalid Twitter Bearer Token")
+                        return None
+                    elif response.status == 404:
+                        logger.error(f"User {username} not found")
+                        return None
+                    else:
+                        logger.error(f"Failed to get user ID for {username}: HTTP {response.status}")
+                        response_text = await response.text()
+                        logger.error(f"Response: {response_text}")
+                        return None
+        except Exception as e:
+            logger.error(f"Error getting user ID for {username}: {e}")
+            return None
+    
+    async def get_user_tweets(self, user_id, max_results=5):
+        """ユーザーの最新ツイートを取得（画像・メディア対応）"""
+        if not await rate_limiter.wait_if_needed():
+            return []
+            
+        url = f"{self.base_url}/users/{user_id}/tweets"
+        headers = {"Authorization": f"Bearer {self.bearer_token}"}
+        params = {
+            "max_results": min(max_results, 5),  # 最大5件に制限
+            "tweet.fields": "created_at,attachments",
+            "media.fields": "url,preview_image_url,type",
+            "expansions": "attachments.media_keys",
+            "exclude": "retweets,replies"
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        tweets = data.get("data", [])
+                        media_info = data.get("includes", {}).get("media", [])
+                        
+                        # ツイートにメディア情報を付与
+                        for tweet in tweets:
+                            tweet['media_info'] = []
+                            if 'attachments' in tweet and 'media_keys' in tweet['attachments']:
+                                for media_key in tweet['attachments']['media_keys']:
+                                    for media in media_info:
+                                        if media['media_key'] == media_key:
+                                            tweet['media_info'].append(media)
+                        
+                        logger.info(f"Retrieved {len(tweets)} tweets for user {user_id}")
+                        return tweets
+                    elif response.status == 429:
+                        logger.error("Rate limit exceeded from Twitter API")
+                        return []
+                    elif response.status == 401:
+                        logger.error("Invalid Twitter Bearer Token")
+                        return []
+                    else:
+                        logger.error(f"Failed to get tweets for user {user_id}: HTTP {response.status}")
+                        response_text = await response.text()
+                        logger.error(f"Response: {response_text}")
+                        return []
+        except Exception as e:
+            logger.error(f"Error getting tweets for user {user_id}: {e}")
+            return []
+
+# 初期化時のエラーハンドリング強化
+def validate_environment():
+    """環境変数の検証"""
+    errors = []
+    
+    if not DISCORD_TOKEN:
+        errors.append("DISCORD_TOKEN is not set")
+    
+    if not CHANNEL_ID:
+        errors.append("CHANNEL_ID is not set or invalid")
+    
+    if not TWITTER_BEARER_TOKEN:
+        errors.append("TWITTER_BEARER_TOKEN is not set")
+    
+    if errors:
+        for error in errors:
+            logger.error(error)
+        return False
+    
+    return True
+
+# 環境変数検証後にTwitterAPI初期化
+if validate_environment():
+    rate_limiter = RateLimiter()
+    twitter_api = TwitterAPI(TWITTER_BEARER_TOKEN)
+else:
+    logger.error("Environment validation failed. Exiting...")
+    exit(1)
+
+async def initialize_user_ids():
+    """起動時にユーザーIDを取得"""
+    logger.info(f"Initializing user IDs for accounts: {list(TARGET_ACCOUNTS.keys())}")
+    
+    for username in TARGET_ACCOUNTS:
+        try:
+            user_id = await twitter_api.get_user_id(username)
+            if user_id:
+                TARGET_ACCOUNTS[username] = user_id
+                logger.info(f"✅ Initialized user ID for {username}: {user_id}")
+            else:
+                logger.error(f"❌ Failed to get user ID for {username}")
+            
+            # ユーザーID取得間でも少し待機
+            await asyncio.sleep(3)
+        except Exception as e:
+            logger.error(f"Error initializing {username}: {e}")
+
+async def check_and_post_updates():
+    """新規ツイートをチェックしてDiscordに送信"""
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
     
     if not channel:
-        logger.error("Discord channel not found")
+        logger.error(f"Discord channel not found (ID: {CHANNEL_ID})")
         return
     
-    logger.info("Checking for new posts (stealth mode)...")
+    logger.info("Checking for new tweets (rate-limited)...")
     
-    for account in TARGET_ACCOUNTS:
+    active_accounts = {k: v for k, v in TARGET_ACCOUNTS.items() if v is not None}
+    logger.info(f"Active accounts: {len(active_accounts)}/{len(TARGET_ACCOUNTS)}")
+    
+    for username, user_id in active_accounts.items():
         try:
-            logger.info(f"Checking {account}...")
-            latest_post = await fetch_latest_post(account, debug_mode=debug_mode)
+            logger.info(f"Checking {username} (ID: {user_id})...")
+            tweets = await twitter_api.get_user_tweets(user_id, max_results=1)
             
-            if latest_post and last_post_urls[account] != latest_post:
-                logger.info(f"New post found for {account}: {latest_post}")
-                last_post_urls[account] = latest_post
+            if tweets:
+                latest_tweet = tweets[0]
+                tweet_id = latest_tweet["id"]
                 
-                embed = discord.Embed(
-                    title=f"🆕 新規投稿 - @{account}",
-                    description=f"[投稿を見る]({latest_post})",
-                    color=0x1DA1F2,
-                    timestamp=datetime.utcnow()
-                )
-                embed.set_footer(text="Stealth Nitter Bot")
-                
-                await channel.send(embed=embed)
-                logger.info(f"Posted update for {account} to Discord")
-            elif latest_post:
-                logger.info(f"No new posts for {account}")
+                if last_tweet_ids[username] != tweet_id:
+                    logger.info(f"🆕 New tweet found for {username}: {tweet_id}")
+                    last_tweet_ids[username] = tweet_id
+                    
+                    # Discord埋め込み（完全クリーン版）
+                    embed = discord.Embed(
+                        description=latest_tweet["text"],
+                        color=0x1DA1F2
+                    )
+                    
+                    # 画像がある場合は最初の画像を表示
+                    if latest_tweet.get('media_info'):
+                        for media in latest_tweet['media_info']:
+                            if media['type'] == 'photo' and 'url' in media:
+                                embed.set_image(url=media['url'])
+                                break  # 最初の画像のみ表示
+                            elif media['type'] == 'video' and 'preview_image_url' in media:
+                                embed.set_image(url=media['preview_image_url'])
+                                break
+                    
+                    await channel.send(embed=embed)
+                    logger.info(f"✅ Posted update for {username} to Discord")
+                else:
+                    logger.info(f"No new tweets for {username}")
             else:
-                logger.warning(f"Failed to fetch posts for {account}")
+                logger.warning(f"No tweets found for {username}")
+            
+            # アカウント間で待機（レート制限考慮）
+            await asyncio.sleep(5)
                 
         except Exception as e:
-            logger.error(f"Error checking {account}: {e}")
-        
-        # アカウント間でランダムな遅延
-        await asyncio.sleep(random.uniform(3.0, 8.0))
+            logger.error(f"Error checking {username}: {e}")
 
-# 定期実行タスク（長めの間隔）
-@tasks.loop(minutes=15)  # Bot検知を避けるため長めの間隔
+# 定期実行タスク（30分間隔 - レート制限を考慮）
+@tasks.loop(minutes=30)
 async def periodic_check():
     await check_and_post_updates()
 
 @periodic_check.before_loop
 async def before_periodic_check():
     await bot.wait_until_ready()
-    logger.info("Stealth bot is ready, starting periodic checks...")
+    await initialize_user_ids()
+    logger.info("Twitter API bot is ready, starting periodic checks...")
 
 @bot.event
 async def on_ready():
     logger.info(f"Bot logged in as {bot.user} (ID: {bot.user.id})")
+    logger.info(f"Target channel: {CHANNEL_ID}")
+    logger.info(f"Monitoring accounts: {list(TARGET_ACCOUNTS.keys())}")
     
-    # 初回チェック（デバッグモード）
-    logger.info("Running initial stealth check...")
-    await check_and_post_updates(debug_mode=True)
+    # 初回チェック実行
+    logger.info("Running initial check...")
+    await check_and_post_updates()
     
+    # 定期チェック開始
     if not periodic_check.is_running():
         periodic_check.start()
 
-# コマンド類
+# 手動チェックコマンド
 @bot.command()
-async def stealth_check(ctx):
-    """ステルスモードで手動チェック"""
+async def check(ctx):
+    """手動でツイートチェックを実行"""
     if ctx.author.guild_permissions.administrator:
-        await ctx.send("🥷 ステルスモードでチェックを開始します...")
-        await check_and_post_updates(debug_mode=True)
-        await ctx.send("✅ ステルスチェック完了！")
+        await ctx.send("🔍 手動チェックを開始します...")
+        await check_and_post_updates()
+        await ctx.send("✅ チェック完了！")
     else:
         await ctx.send("❌ このコマンドは管理者のみ使用できます。")
 
+# レート制限状況確認コマンド
 @bot.command()
-async def test_stealth(ctx, account=None):
-    """特定アカウントのステルステスト"""
+async def rate_status(ctx):
+    """レート制限状況を確認"""
+    embed = discord.Embed(title="📊 Twitter API レート制限状況", color=0x1DA1F2)
+    
+    # 月間使用量
+    remaining_monthly = rate_limiter.monthly_limit - rate_limiter.monthly_count
+    embed.add_field(
+        name="月間使用量",
+        value=f"{rate_limiter.monthly_count:,}/{rate_limiter.monthly_limit:,}\n残り: {remaining_monthly:,}",
+        inline=False
+    )
+    
+    # 15分間のウィンドウ
+    now = datetime.now()
+    cutoff = now - timedelta(seconds=900)
+    recent_requests = [req for req in rate_limiter.requests if req > cutoff]
+    
+    embed.add_field(
+        name="15分間の使用量",
+        value=f"{len(recent_requests)}/75",
+        inline=True
+    )
+    
+    # 次回リセット時刻
+    if rate_limiter.requests:
+        next_reset = rate_limiter.requests[0] + timedelta(seconds=900)
+        embed.add_field(
+            name="次回リセット",
+            value=f"<t:{int(next_reset.timestamp())}:R>",
+            inline=True
+        )
+    
+    # 月間リセット
+    month_reset = rate_limiter.month_start + timedelta(days=30)
+    embed.add_field(
+        name="月間リセット",
+        value=f"<t:{int(month_reset.timestamp())}:D>",
+        inline=True
+    )
+    
+    await ctx.send(embed=embed)
+
+# ユーザーID確認コマンド
+@bot.command()
+async def user_ids(ctx):
+    """監視対象アカウントのユーザーIDを確認"""
     if not ctx.author.guild_permissions.administrator:
         await ctx.send("❌ このコマンドは管理者のみ使用できます。")
         return
     
-    if not account:
-        account = random.choice(TARGET_ACCOUNTS)
+    embed = discord.Embed(title="👤 監視対象アカウント", color=0x1DA1F2)
     
-    await ctx.send(f"🔍 {account} のステルステストを開始...")
+    for username, user_id in TARGET_ACCOUNTS.items():
+        status = "✅" if user_id else "❌"
+        embed.add_field(
+            name=f"{status} @{username}",
+            value=f"ID: {user_id or 'Not found'}",
+            inline=False
+        )
     
-    try:
-        result = await fetch_latest_post(account, debug_mode=True)
-        if result:
-            await ctx.send(f"✅ 成功！投稿URL: {result}")
-        else:
-            await ctx.send("❌ 投稿を取得できませんでした。ログを確認してください。")
-    except Exception as e:
-        await ctx.send(f"❌ エラー: {str(e)}")
+    await ctx.send(embed=embed)
 
+# 設定情報表示コマンド
 @bot.command()
-async def status(ctx):
-    """ボット状態確認"""
-    embed = discord.Embed(title="🥷 Stealth Nitter Bot Status", color=0x00ff00)
-    embed.add_field(name="監視アカウント", value="\n".join(TARGET_ACCOUNTS), inline=False)
-    embed.add_field(name="定期チェック", value="✅ 動作中" if periodic_check.is_running() else "❌ 停止中", inline=True)
-    embed.add_field(name="チェック間隔", value="15分", inline=True)
-    embed.add_field(name="インスタンス数", value=f"{len(NITTER_INSTANCES)}個", inline=True)
-    embed.add_field(name="特徴", value="• ランダム遅延\n• リアルなUA\n• Cookie保持", inline=False)
+async def config(ctx):
+    """Bot設定情報を表示"""
+    embed = discord.Embed(title="⚙️ Bot設定情報", color=0x00ff00)
+    embed.add_field(name="チェック間隔", value="30分", inline=True)
+    embed.add_field(name="レート制限", value="75回/15分", inline=True)
+    embed.add_field(name="月間制限", value="10,000ツイート", inline=True)
+    embed.add_field(name="監視アカウント数", value=f"{len(TARGET_ACCOUNTS)}個", inline=True)
+    embed.add_field(name="API バージョン", value="Twitter API v2", inline=True)
+    embed.add_field(name="プラン", value="Basic (無料)", inline=True)
+    embed.add_field(name="サービス", value="Background Worker", inline=True)
+    embed.add_field(name="機能", value="ツイート本文 + 画像対応", inline=True)
+    
     await ctx.send(embed=embed)
 
 if __name__ == '__main__':
-    logger.info("Starting Stealth Nitter Bot...")
-    logger.info(f"Monitoring accounts: {TARGET_ACCOUNTS}")
+    logger.info("=== Starting Twitter API Discord Bot ===")
+    logger.info(f"Monitoring accounts: {list(TARGET_ACCOUNTS.keys())}")
     logger.info(f"Target channel ID: {CHANNEL_ID}")
     
     try:
-        bot.run(TOKEN)
+        bot.run(DISCORD_TOKEN)
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
+        exit(1)
