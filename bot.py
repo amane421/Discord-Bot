@@ -1,3 +1,5 @@
+skip_until = {}
+
 import os
 import discord
 from discord.ext import tasks, commands
@@ -130,60 +132,59 @@ class TwitterAPI:
             logger.error(f"Error getting user ID for {username}: {e}")
             return None
     
-    async def get_user_tweets(self, user_id, max_results=5):
-        """ユーザーの最新ツイートを取得（画像・メディア対応）"""
-        if not await rate_limiter.wait_if_needed():
-            return []
-            
-        url = f"{self.base_url}/users/{user_id}/tweets"
-        headers = {"Authorization": f"Bearer {self.bearer_token}"}
-        
-        # max_resultsの値を確実に5以上に設定
-        max_results = max(5, min(max_results, 100))
-        
-        params = {
-            "max_results": max_results,  # 最小5、最大100
-            "tweet.fields": "created_at,attachments",
-            "media.fields": "url,preview_image_url,type",
-            "expansions": "attachments.media_keys",
-            "exclude": "retweets,replies"
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        tweets = data.get("data", [])
-                        media_info = data.get("includes", {}).get("media", [])
-                        
-                        # ツイートにメディア情報を付与
-                        for tweet in tweets:
-                            tweet['media_info'] = []
-                            if 'attachments' in tweet and 'media_keys' in tweet['attachments']:
-                                for media_key in tweet['attachments']['media_keys']:
-                                    for media in media_info:
-                                        if media['media_key'] == media_key:
-                                            tweet['media_info'].append(media)
-                        
-                        logger.info(f"Retrieved {len(tweets)} tweets for user {user_id}")
-                        return tweets
-                    elif response.status == 429:
-                        logger.error("Rate limit exceeded from Twitter API")
-                        # レート制限に達した場合、より長く待機
-                        await asyncio.sleep(300)  # 5分待機
-                        return []
-                    elif response.status == 401:
-                        logger.error("Invalid Twitter Bearer Token")
-                        return []
-                    else:
-                        logger.error(f"Failed to get tweets for user {user_id}: HTTP {response.status}")
-                        response_text = await response.text()
-                        logger.error(f"Response: {response_text}")
-                        return []
-        except Exception as e:
-            logger.error(f"Error getting tweets for user {user_id}: {e}")
-            return []
+async def get_user_tweets(self, user_id, username, max_results=5):
+    """ユーザーの最新ツイートを取得（画像・メディア対応 + スキップ対応）"""
+    if not await rate_limiter.wait_if_needed():
+        return []
+
+    url = f"{self.base_url}/users/{user_id}/tweets"
+    headers = {"Authorization": f"Bearer {self.bearer_token}"}
+    max_results = max(5, min(max_results, 100))
+
+    params = {
+        "max_results": max_results,
+        "tweet.fields": "created_at,attachments",
+        "media.fields": "url,preview_image_url,type",
+        "expansions": "attachments.media_keys",
+        "exclude": "retweets,replies"
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    tweets = data.get("data", [])
+                    media_info = data.get("includes", {}).get("media", [])
+
+                    for tweet in tweets:
+                        tweet['media_info'] = []
+                        if 'attachments' in tweet and 'media_keys' in tweet['attachments']:
+                            for media_key in tweet['attachments']['media_keys']:
+                                for media in media_info:
+                                    if media['media_key'] == media_key:
+                                        tweet['media_info'].append(media)
+
+                    logger.info(f"Retrieved {len(tweets)} tweets for user {user_id}")
+                    return tweets
+                elif response.status == 429:
+                    logger.error("Rate limit exceeded from Twitter API")
+                    skip_until[username] = datetime.utcnow() + timedelta(minutes=15)
+                    logger.warning(f"Temporarily skipping {username} for 15 minutes.")
+                    await asyncio.sleep(300)
+                    return []
+                elif response.status == 401:
+                    logger.error("Invalid Twitter Bearer Token")
+                    return []
+                else:
+                    logger.error(f"Failed to get tweets for user {user_id}: HTTP {response.status}")
+                    response_text = await response.text()
+                    logger.error(f"Response: {response_text}")
+                    return []
+    except Exception as e:
+        logger.error(f"Error getting tweets for user {user_id}: {e}")
+        return []
+
 
 # 初期化時のエラーハンドリング強化
 def validate_environment():
@@ -236,7 +237,7 @@ async def initialize_user_ids():
             logger.error(f"Error initializing {username}: {e}")
 
 async def check_and_post_updates():
-    """新規ツイートをチェックしてDiscordに送信（複数投稿対応）"""
+    """新規ツイートをチェックしてDiscordに送信（複数投稿対応 + スキップ管理）"""
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
     
@@ -244,66 +245,55 @@ async def check_and_post_updates():
         logger.error(f"Discord channel not found (ID: {CHANNEL_ID})")
         return
     
-    # チャンネル権限チェック
     bot_member = channel.guild.get_member(bot.user.id)
     if bot_member and not channel.permissions_for(bot_member).send_messages:
         logger.error(f"❌ Bot doesn't have permission to send messages in channel {CHANNEL_ID}")
-        logger.error(f"Please grant 'Send Messages' and 'Embed Links' permissions to the bot in this channel")
         return
-    
+
     logger.info("Checking for new tweets (rate-limited)...")
     
-    # 初回実行時のみユーザーIDを初期化
+    # 初回のユーザーID取得
     if None in TARGET_ACCOUNTS.values():
         logger.info("Some accounts not initialized, initializing now...")
         await initialize_user_ids()
     
-    active_accounts = {k: v for k, v in TARGET_ACCOUNTS.items() if v is not None}
+    now = datetime.utcnow()
+    active_accounts = {
+        k: v for k, v in TARGET_ACCOUNTS.items()
+        if v is not None and (k not in skip_until or skip_until[k] <= now)
+    }
     logger.info(f"Active accounts: {len(active_accounts)}/{len(TARGET_ACCOUNTS)}")
-    
+
     for username, user_id in active_accounts.items():
         try:
             logger.info(f"Checking {username} (ID: {user_id})...")
-            tweets = await twitter_api.get_user_tweets(user_id, max_results=5)
+            tweets = await twitter_api.get_user_tweets(user_id, username, max_results=5)
             
             if tweets:
                 new_tweets = []
-                
-                # 新規ツイートを特定
+
                 for tweet in tweets:
                     tweet_id = tweet["id"]
-                    
-                    # 初回チェック時または新規ツイートの場合
                     if last_tweet_ids[username] is None:
-                        # 初回は最新の1件のみ投稿
                         new_tweets = [tweets[0]]
                         break
                     elif tweet_id == last_tweet_ids[username]:
-                        # 既知のツイートに到達したら終了
                         break
                     else:
-                        # 新規ツイートを追加
                         new_tweets.append(tweet)
-                
-                # 最新のツイートIDを更新
+
                 if tweets:
                     last_tweet_ids[username] = tweets[0]["id"]
-                
-                # 新規ツイートを古い順に投稿
+
                 for tweet in reversed(new_tweets):
                     logger.info(f"🆕 New tweet found for {username}: {tweet['id']}")
-                    
                     try:
-                        # Discord埋め込み
                         embed = discord.Embed(
                             description=tweet["text"],
                             color=0x1DA1F2,
                             timestamp=datetime.utcnow()
                         )
-                        embed.set_author(name=f"@{username}", url=f"https://twitter.com/{username}")
-                        embed.add_field(name="ツイートを見る", value=f"[リンク](https://twitter.com/{username}/status/{tweet['id']})", inline=False)
-                        
-                        # 画像がある場合は最初の画像を表示
+
                         if tweet.get('media_info'):
                             for media in tweet['media_info']:
                                 if media['type'] == 'photo' and 'url' in media:
@@ -312,26 +302,21 @@ async def check_and_post_updates():
                                 elif media['type'] == 'video' and 'preview_image_url' in media:
                                     embed.set_image(url=media['preview_image_url'])
                                     break
-                        
+
                         await channel.send(embed=embed)
                         logger.info(f"✅ Posted update for {username} to Discord")
-                        
-                        # 連続投稿の間隔を空ける
                         await asyncio.sleep(2)
                     except discord.Forbidden:
                         logger.error("❌ Permission denied: Cannot send messages to this channel")
-                        logger.error("Please check bot permissions in Discord")
                         return
                     except Exception as e:
                         logger.error(f"Error posting to Discord: {e}")
-                
-                if not new_tweets:
-                    logger.info(f"No new tweets for {username}")
             else:
-                logger.warning(f"No tweets found for {username}")
+                logger.info(f"No new tweets for {username}")
                 
         except Exception as e:
             logger.error(f"Error checking {username}: {e}")
+
 
 # 定期実行タスク（2時間間隔 - 無料プラン対応）
 @tasks.loop(hours=2)  # 2時間間隔
