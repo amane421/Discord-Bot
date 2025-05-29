@@ -55,13 +55,13 @@ class RateLimiter:
             elapsed = (now - self.last_request_time).total_seconds()
             if elapsed < self.min_request_interval:
                 wait_time = self.min_request_interval - elapsed
-                logger.info(f"Waiting {wait_time:.1f}s for minimum interval (3min)...")
+                logger.info(f"Waiting {wait_time:.1f}s for minimum interval (3min safety)...")
                 await asyncio.sleep(wait_time)
                 now = datetime.now()
         
         # 月間制限チェック（ツイート数で計算）
-        # 1リクエストで5ツイート取得 × 月間リクエスト数
-        estimated_monthly_tweets = self.monthly_count * 5
+        # 1リクエストで20ツイート取得 × 月間リクエスト数
+        estimated_monthly_tweets = self.monthly_count * 20
         if estimated_monthly_tweets >= self.monthly_limit:
             logger.error("Monthly tweet limit exceeded! Waiting until next month...")
             return False
@@ -87,6 +87,7 @@ class RateLimiter:
         self.requests.append(now)
         self.monthly_count += 1
         self.last_request_time = now
+        estimated_monthly_tweets = self.monthly_count * 20
         logger.info(f"API Request #{self.monthly_count} (≈{estimated_monthly_tweets} tweets/10000 this month)")
         return True
 
@@ -280,7 +281,7 @@ async def check_and_post_updates():
     for username, user_id in active_accounts.items():
         try:
             logger.info(f"Checking {username} (ID: {user_id})...")
-            tweets = await twitter_api.get_user_tweets(user_id, username, max_results=5)
+            tweets = await twitter_api.get_user_tweets(user_id, username, max_results=20)
             
             if tweets:
                 new_tweets = []
@@ -331,10 +332,10 @@ async def check_and_post_updates():
             logger.error(f"Error checking {username}: {e}")
 
 
-# 定期実行タスク（2時間間隔 - リクエスト間隔のみ延長）
-@tasks.loop(hours=2)  # 2時間間隔を維持
+# 定期実行タスク（3時間間隔 - 月間制限対応）
+@tasks.loop(hours=3)  # 3時間間隔
 async def periodic_check():
-    """2時間ごとに新規ツイートをチェック"""
+    """3時間ごとに新規ツイートをチェック"""
     await check_and_post_updates()
 
 @periodic_check.before_loop
@@ -375,7 +376,7 @@ async def rate_status(ctx):
     embed = discord.Embed(title="📊 Twitter API レート制限状況", color=0x1DA1F2)
     
     # 月間使用量
-    estimated_monthly_tweets = rate_limiter.monthly_count * 5
+    estimated_monthly_tweets = rate_limiter.monthly_count * 20
     remaining_monthly = rate_limiter.monthly_limit - estimated_monthly_tweets
     embed.add_field(
         name="月間使用量",
@@ -462,10 +463,10 @@ async def usage(ctx):
     embed = discord.Embed(title="📊 API使用量分析", color=0x1DA1F2)
     
     # 現在の設定
-    check_interval_hours = 2  # 2時間
+    check_interval_hours = 3  # 3時間
     accounts = len([v for v in TARGET_ACCOUNTS.values() if v is not None])
     requests_per_check = accounts  # 各アカウント1リクエスト
-    tweets_per_request = 5
+    tweets_per_request = 20
     
     # 1日の計算
     checks_per_day = 24 / check_interval_hours
@@ -539,7 +540,7 @@ async def user_ids(ctx):
 async def config(ctx):
     """Bot設定情報を表示"""
     embed = discord.Embed(title="⚙️ Bot設定情報", color=0x00ff00)
-    embed.add_field(name="チェック間隔", value="2時間", inline=True)
+    embed.add_field(name="チェック間隔", value="3時間", inline=True)
     embed.add_field(name="レート制限", value="10回/15分", inline=True)
     embed.add_field(name="月間制限", value="10,000ツイート", inline=True)
     embed.add_field(name="監視アカウント数", value=f"{len(TARGET_ACCOUNTS)}個", inline=True)
@@ -557,7 +558,7 @@ if __name__ == '__main__':
     logger.info(f"Target channel ID: {CHANNEL_ID}")
     logger.info("Using Twitter API v2 Basic (Free) plan limits")
     logger.info("Rate limit: 10 requests per 15 minutes")
-    logger.info("Check interval: 2 hours")
+    logger.info("Check interval: 3 hours")
     
     try:
         bot.run(DISCORD_TOKEN)
