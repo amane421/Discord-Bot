@@ -18,10 +18,10 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID")) if os.environ.get("CHANNEL_ID") else None
 TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
 
-# 🎯 監視対象のアカウント（ここを変更してください）
+# 🎯 監視対象のアカウント（angorou7を無効化）
 TARGET_ACCOUNTS = {
-    "CryptoJPTrans": None,  # ← 必要に応じて変更
-    "angorou7": None        # ← 必要に応じて変更
+    "CryptoJPTrans": None,  # ← メインアカウントのみ監視
+    # "angorou7": None,     # ← コメントアウトして無効化
     # "他のアカウント名": None,  # ← 追加したい場合
 }
 
