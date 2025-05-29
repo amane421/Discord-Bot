@@ -43,7 +43,7 @@ class RateLimiter:
         self.monthly_count = 0
         self.monthly_limit = 10000    # 月間10,000ツイート
         self.month_start = datetime.now()
-        self.min_request_interval = 90  # 最小90秒間隔（15分÷10リクエスト）
+        self.min_request_interval = 180  # 最小180秒間隔（3分間隔で安全性向上）
         self.last_request_time = None
     
     async def wait_if_needed(self):
@@ -55,7 +55,7 @@ class RateLimiter:
             elapsed = (now - self.last_request_time).total_seconds()
             if elapsed < self.min_request_interval:
                 wait_time = self.min_request_interval - elapsed
-                logger.info(f"Waiting {wait_time:.1f}s for minimum interval...")
+                logger.info(f"Waiting {wait_time:.1f}s for minimum interval (3min)...")
                 await asyncio.sleep(wait_time)
                 now = datetime.now()
         
@@ -151,6 +151,13 @@ class TwitterAPI:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers, params=params) as response:
+                    # レート制限の詳細情報をログ出力
+                    rate_limit_remaining = response.headers.get('x-rate-limit-remaining', 'Unknown')
+                    rate_limit_reset = response.headers.get('x-rate-limit-reset', 'Unknown')
+                    rate_limit_limit = response.headers.get('x-rate-limit-limit', 'Unknown')
+                    
+                    logger.info(f"Rate limit info - Remaining: {rate_limit_remaining}, Limit: {rate_limit_limit}, Reset: {rate_limit_reset}")
+                    
                     if response.status == 200:
                         data = await response.json()
                         tweets = data.get("data", [])
@@ -169,6 +176,8 @@ class TwitterAPI:
 
                     elif response.status == 429:
                         logger.error("Rate limit exceeded from Twitter API")
+                        response_text = await response.text()
+                        logger.error(f"Rate limit response: {response_text}")
                         skip_until[username] = datetime.utcnow() + timedelta(minutes=15)
                         logger.warning(f"Temporarily skipping {username} for 15 minutes.")
                         await asyncio.sleep(300)
@@ -176,6 +185,8 @@ class TwitterAPI:
 
                     elif response.status == 401:
                         logger.error("Invalid Twitter Bearer Token")
+                        response_text = await response.text()
+                        logger.error(f"Auth error response: {response_text}")
                         return []
 
                     else:
@@ -320,8 +331,8 @@ async def check_and_post_updates():
             logger.error(f"Error checking {username}: {e}")
 
 
-# 定期実行タスク（2時間間隔 - 無料プラン対応）
-@tasks.loop(hours=2)  # 2時間間隔
+# 定期実行タスク（2時間間隔 - リクエスト間隔のみ延長）
+@tasks.loop(hours=2)  # 2時間間隔を維持
 async def periodic_check():
     """2時間ごとに新規ツイートをチェック"""
     await check_and_post_updates()
